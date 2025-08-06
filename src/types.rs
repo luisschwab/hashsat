@@ -13,6 +13,8 @@ use bitcoin::{
 pub(crate) struct Wallet {
     /// The BIP39-compliant mnemonic.
     pub(crate) mnemonic: Mnemonic,
+    /// The alphabet used to search for the passphrase.
+    pub(crate) alphabet: String,
     /// The target address where it is known coins are locked.
     pub(crate) target_address: Address,
     /// The derivation path used on the search.
@@ -35,6 +37,7 @@ pub(crate) struct Wallet {
 impl fmt::Display for Wallet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "mnemonic: {}", self.mnemonic)?;
+        writeln!(f, "alphabet: {}", self.alphabet)?;
         writeln!(f, "target address: {}", self.target_address)?;
         writeln!(f, "derivation path: {}", self.derivation_path)?;
         writeln!(f, "search width: {}", self.search_width)?;

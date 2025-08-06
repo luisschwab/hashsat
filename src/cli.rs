@@ -22,7 +22,24 @@ pub(crate) struct Arguments {
     )]
     pub(crate) mnemonic: String,
 
-    #[arg(short, long, value_name = "network", default_value = "bitcoin", value_parser = PossibleValuesParser::new(["bitcoin", "signet", "testnet3", "testnet4"]), help = "The bitcoin network to search for addresses at")]
+    #[arg(
+        short,
+        long,
+        value_name = "alphabet",
+        default_value = "alphanumeric",
+        value_parser = PossibleValuesParser::new(["alphanumeric", "alphanumeric_uppercase", "alphanumeric_lowercase", "uppercase", "lowercase", "numeric"]),
+        help = "The alphabet to search passphrases from. Constraining the passphrase search space will improve cracking times exponentially"
+    )]
+    pub(crate) alphabet: String,
+
+    #[arg(
+        short,
+        long,
+        value_name = "network",
+        default_value = "bitcoin",
+        value_parser = PossibleValuesParser::new(["bitcoin", "signet", "testnet3", "testnet4"]),
+        help = "The bitcoin network to search for addresses at"
+    )]
     pub(crate) network: String,
 
     #[arg(
@@ -64,6 +81,8 @@ pub(crate) struct Arguments {
 pub(crate) fn parse_cli_arguments(args: Arguments) -> Result<Wallet, HashsatError> {
     // Parse the mnemonic.
     let mnemonic = Mnemonic::from_str(&args.mnemonic)?;
+    // Parse the passphrase alphabet.
+    let alphabet = args.alphabet;
     // Parse the network.
     let network = Network::from_str(&args.network)?;
     // Parse the target address.
@@ -108,6 +127,7 @@ pub(crate) fn parse_cli_arguments(args: Arguments) -> Result<Wallet, HashsatErro
 
     Ok(Wallet {
         mnemonic,
+        alphabet,
         target_address,
         derivation_path,
         search_width,

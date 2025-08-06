@@ -11,14 +11,13 @@ use bitcoin::{
     key::Secp256k1,
 };
 
-/// The alphabet used to crack the passphrase. This will not cover the most secure passphrases, but
-/// most people don't use special characters on them.
-const ALPHABET_ALPHANUMERIC: &str =
-    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-#[allow(dead_code)]
-const ALPHABET_LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
-#[allow(dead_code)]
+#[rustfmt::skip]
+const ALPHABET_ALPHANUMERIC: &str ="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ALPHABET_ALPHANUMERIC_UPPERCASE: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const ALPHABET_ALPHANUMERIC_LOWERCASE: &str = "0123456789abcdefghijklmnopqrstuvwxyz";
 const ALPHABET_UPPERCASE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const ALPHABET_LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
+const ALPHABET_NUMERIC: &str = "0123456789";
 
 const COMMAS: [&str; 4] = ["", ".", "..", "..."];
 const SPINNERS: [char; 4] = ['\\', '|', '/', '–'];
@@ -36,8 +35,19 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
     std::thread::sleep(Duration::from_secs(1));
     print_cracking_params(wallet);
 
+    // Select the alphabet.
+    let alphabet = match wallet.alphabet.as_str() {
+        "alphanumeric" => ALPHABET_ALPHANUMERIC,
+        "alphanumeric_uppercase" => ALPHABET_ALPHANUMERIC_UPPERCASE,
+        "alphanumeric_lowercase" => ALPHABET_ALPHANUMERIC_LOWERCASE,
+        "uppercase" => ALPHABET_UPPERCASE,
+        "lowercase" => ALPHABET_LOWERCASE,
+        "numeric" => ALPHABET_NUMERIC,
+        &_ => ALPHABET_ALPHANUMERIC,
+    };
+
     // Generate all possible passphrases, which are lazy eval'd.
-    let passphrases = generate_passphrases_up_to(wallet.max_passphrase_len, ALPHABET_ALPHANUMERIC);
+    let passphrases = generate_passphrases_up_to(wallet.max_passphrase_len, alphabet);
 
     // Derive a wallet from each passphrase, then derive
     // some addresses and check against the target.
@@ -230,9 +240,11 @@ fn format_number(n: usize) -> String {
 /// Print cracking parameters.
 fn print_cracking_params(wallet: &Wallet) {
     println!("cracking");
-    println!(" \"{}\"", wallet.mnemonic);
+    println!(" {}", wallet.mnemonic);
+    println!("using alphabet");
+    println!(" {}", wallet.alphabet);
     println!("with target address");
-    println!(" \"{}\"", wallet.target_address);
+    println!(" {}", wallet.target_address);
     println!("on network");
     println!(" {}", wallet.network);
     println!("with search width of");
