@@ -36,23 +36,28 @@ flowchart TD
 ```
 
 ## Usage
+
 Clone the _hashsat_ repository:
+
 ```shell
 git clone https://github.com/luisschwab/hashsat
 ```
 
 Build the binary:
+
 ```shell
 cd hashsat
 cargo build --release
 ```
 
 Install the `hashsat` binary to your system's Cargo path:
+
 ```shell
 cargo install --path .
 ```
 
 To crack a passphrase, you MUST provide a [BIP39](https://bips.dev/39/)-compliant mnemonic phrase and a target address. You can also pass a custom bitcoin network (deafults to `Bitcoin`), a custom derivation path (defaults to the standard derivation path for that address type), a search width (how many addresses will be derived on each wallet tried) and a maximum passphrase length.
+
 ```shell
 % hashsat --help
 a bitcoin passphrase cracker
@@ -62,6 +67,8 @@ Usage: hashsat [OPTIONS] --mnemonic <mnemonic> --target-address <target_address>
 Options:
   -m, --mnemonic <mnemonic>
           12, 15, 18, 21 or 24 word mnemonic
+  -a, --alphabet <alphabet>
+          The alphabet to search passphrases from. Constraining the passphrase search space will improve cracking times exponentially [default: alphanumeric] [possible values: alphanumeric, alphanumeric_uppercase, alphanumeric_lowercase, uppercase, lowercase, numeric]
   -n, --network <network>
           The bitcoin network to search for addresses at [default: bitcoin] [possible values: bitcoin, signet, testnet3, testnet4]
   -t, --target-address <target_address>
@@ -70,8 +77,8 @@ Options:
           The derivation path for your wallet. Use this flag if your wallet has a non-standard derivation path
   -s, --search-width <search_width>
           How many addresses to derive on each tried wallet. Your `target_address` derivation index has to be lower or equal to this [default: 10]
-  -l, --max-passphrase-length <max_passphrase_len>
-          The maximum passphrase lenght to be searched. Will return an error if your address is not found within the search space [default: 10]
+  -r, --passphrase-length-range <passphrase_length_range>
+          The passphrase lenght range to be searched. Will return an error if your address is not found within the search space [default: 1,10]
   -h, --help
           Print help
   -V, --version
@@ -79,6 +86,7 @@ Options:
 ```
 
 Cracking a passphrase:
+
 ```shell
 ~% hashsat -m "lady miracle someone puppy rack nuclear fan ketchup conduct cute cat client" -t bc1qjjvrq88dgknydcx4temeqef7e8yxl4dd05t2an
 
@@ -116,11 +124,13 @@ xpriv: xprv9s21ZrQH143K4HBbmL89g1cBtdszmTR8uGvNeGaip1bk6vmTy2ff1yzh4EVTmQvjHEU8G
 _hashsat_ only depends on the Rust toolchain (and the `just` command runner for development).
 
 To install the Rust toolchain:
+
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 To install `just`:
+
 ```shell
 brew install just
 ```

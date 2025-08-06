@@ -23,7 +23,7 @@ pub(crate) struct Wallet {
     /// The maximum search width for a parent key on the BIP32 HD tree.
     pub(crate) search_width: usize,
     /// The maximum passphrase length to search.
-    pub(crate) max_passphrase_len: usize,
+    pub(crate) passphrase_length_range: (usize, usize),
     /// The network to be searched.
     pub(crate) network: Network,
     /// The cracked passphrase.
@@ -41,7 +41,11 @@ impl fmt::Display for Wallet {
         writeln!(f, "target address: {}", self.target_address)?;
         writeln!(f, "derivation path: {}", self.derivation_path)?;
         writeln!(f, "search width: {}", self.search_width)?;
-        writeln!(f, "max passphrase length: {}", self.max_passphrase_len)?;
+        writeln!(
+            f,
+            "passphrase length range: ({},{})",
+            self.passphrase_length_range.0, self.passphrase_length_range.1
+        )?;
         writeln!(f, "network: {}", self.network)?;
         writeln!(
             f,

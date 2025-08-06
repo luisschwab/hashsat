@@ -22,8 +22,8 @@ pub(crate) enum HashsatError {
     #[error("Unsupported script type: {0}")]
     UnsupportedAddressType(String),
 
-    #[error("Depleted search space of {0} chars before finding any matches")]
-    DepletedSearchSpace(usize),
+    #[error("Depleted search space of ({0},{1}) chars before finding any matches")]
+    DepletedSearchSpace(usize, usize),
 
     #[error("I/O error: {0}")]
     IOError(#[from] std::io::Error),
