@@ -33,8 +33,6 @@ flowchart TD
     I -- 0 --> C
     I -- 1 --> K
 
-    A ~~~ B
-    C ~~~ D
 ```
 
 ## Usage
