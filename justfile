@@ -22,5 +22,5 @@ fmt:
 
 # Install the binary to Cargo's PATH
 install: build
-    cargo install --path .
+    cargo install --path . --force
     
