@@ -2,6 +2,11 @@
 
 use std::{
     io::{Write, stdout},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -24,6 +29,13 @@ const SPINNERS: [char; 4] = ['\\', '|', '/', '–'];
 
 use crate::{error::HashsatError, types::Wallet};
 
+#[derive(Clone)]
+struct CrackResult {
+    passphrase: String,
+    xpub: Xpub,
+    xpriv: Xpriv,
+}
+
 /// Crack the passphrase with [`ALPHABET`] until [`MAX_PASSPHRASE_LEN`] is depleted.
 /// TODO(@luisschwab): make this async and parallel.
 pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
@@ -36,88 +48,155 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
     print_cracking_params(wallet);
 
     // Select the alphabet.
-    let alphabet = match wallet.alphabet.as_str() {
-        "alphanumeric" => ALPHABET_ALPHANUMERIC,
-        "alphanumeric_uppercase" => ALPHABET_ALPHANUMERIC_UPPERCASE,
-        "alphanumeric_lowercase" => ALPHABET_ALPHANUMERIC_LOWERCASE,
-        "uppercase" => ALPHABET_UPPERCASE,
-        "lowercase" => ALPHABET_LOWERCASE,
-        "numeric" => ALPHABET_NUMERIC,
-        &_ => ALPHABET_ALPHANUMERIC,
-    };
+    let alphabet = get_alphabet(&wallet.alphabet);
 
-    // Generate all possible passphrases, which are lazy eval'd.
+    // Passphrase ranges.
     let min = wallet.passphrase_length_range.0;
     let max = wallet.passphrase_length_range.1;
-    let mut passphrase_set = Vec::new();
-    for len in min..=max {
-        let passphrase_subset = generate_passphrases_of_size(len, alphabet);
-        passphrase_set.push(passphrase_subset);
-    }
 
-    // Derive a wallet from each passphrase, then derive
-    // some addresses and check against the target.
+    // Thread-common state.
+    let found = Arc::new(AtomicBool::new(false));
+    let tries_ctr = Arc::new(AtomicUsize::new(0));
+    let crack_res = Arc::new(Mutex::new(None::<CrackResult>));
+    let curr_passphrase = Arc::new(Mutex::new(String::new()));
+
+    // Start time.
     let start = Instant::now();
-    let (mut comma_idx, mut spinner_idx) = (0, 0);
-    for passphrase_subset in passphrase_set {
-        for (tries, passphrase) in passphrase_subset.enumerate() {
-            if tries % 169 == 0 {
+
+    // Progress thread.
+    let found_clone = found.clone();
+    let tries_ctr_clone = tries_ctr.clone();
+    let curr_passphrase_clone = curr_passphrase.clone();
+    let progress_handle = thread::spawn(move || {
+        let (mut comma_idx, mut spinner_idx) = (0, 0);
+
+        while !found_clone.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(100));
+
+            let tries = tries_ctr_clone.load(Ordering::Relaxed);
+            if tries > 0 {
                 let elapsed = start.elapsed();
+                let curr_passphrase = curr_passphrase_clone.lock().unwrap().clone();
 
                 print!(
-                    "\r{} cracking sats : {} ({} wallets in {}){:<3}",
+                    "\r{} cracking sats : {:?} ({} wallets in {}){:<3}",
                     SPINNERS[spinner_idx],
-                    passphrase,
+                    curr_passphrase,
                     format_number(tries),
                     format_duration(elapsed),
                     COMMAS[comma_idx],
                 );
-                stdout().flush()?;
+                stdout().flush().unwrap_or(());
 
-                // Update idx's.
-                if tries % 6 == 0 {
-                    comma_idx = (comma_idx + 1) % COMMAS.len();
-                }
+                comma_idx = (comma_idx + 1) % COMMAS.len();
                 spinner_idx = (spinner_idx + 1) % SPINNERS.len();
             }
-
-            if let Some(jackpot) = derive_wallet(wallet, &passphrase) {
-                wallet.passphrase = Some(jackpot.0);
-                wallet.xpub = Some(jackpot.1);
-                wallet.xpriv = Some(jackpot.2);
-
-                let elapsed = start.elapsed();
-                print!(
-                    "\r{} cracking sats : {} ({} wallets in {}){:<3}",
-                    SPINNERS[spinner_idx],
-                    passphrase,
-                    format_number(tries),
-                    format_duration(elapsed),
-                    COMMAS[comma_idx],
-                );
-                stdout().flush()?;
-
-                println!("\n\nJACKPOT!");
-                println!(
-                    "hashsat found your lost sats in {} and {} tries ({} wallets per second)\n",
-                    format_duration(start.elapsed()),
-                    format_number(tries),
-                    tries as u64 / start.elapsed().as_secs()
-                );
-                println!("{wallet}");
-
-                // Unhide the cursor.
-                print!("\x1b[?25h");
-
-                return Ok(());
-            }
         }
+    });
+
+    // Generate all possible passphrases, which are lazy eval'd.
+    let mut passphrase_set: Vec<Box<dyn Iterator<Item = String> + Send>> = Vec::new();
+    for size in min..=max {
+        let passphrase_subset = generate_passphrases_of_size(size, alphabet);
+        passphrase_set.push(Box::new(passphrase_subset));
+    }
+    let passphrase_set_len = passphrase_set.len() - 1;
+
+    let handles: Vec<_> = passphrase_set
+        .into_iter()
+        .enumerate()
+        .map(|(idx, passphrase_subset)| {
+            let wallet_clone = wallet.clone();
+            let found_clone = found.clone();
+            let tries_ctr_clone = tries_ctr.clone();
+            let crack_res_clone = crack_res.clone();
+            let curr_passphrase_clone = curr_passphrase.clone();
+
+            thread::spawn(move || {
+                println!("hasher {idx} ready!");
+                if idx >= passphrase_set_len {
+                    println!();
+                }
+
+                for passphrase in passphrase_subset {
+                    if found_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    if tries_ctr_clone.fetch_add(1, Ordering::Relaxed) % 21 == 0 {
+                        *curr_passphrase_clone.lock().unwrap() = passphrase.clone();
+                    }
+
+                    // Derive a wallet from each passphrase, then derive
+                    // some addresses and check against the target.
+                    if let Some((passphrase, xpub, xpriv)) =
+                        derive_wallet_and_assert(&wallet_clone, &passphrase)
+                    {
+                        found_clone.store(true, Ordering::Relaxed);
+                        *crack_res_clone.lock().unwrap() = Some(CrackResult {
+                            passphrase,
+                            xpub,
+                            xpriv,
+                        });
+                        break;
+                    }
+                }
+            })
+        })
+        .collect();
+
+    // Wait for all threads.
+    for handle in handles {
+        handle.join().unwrap();
     }
 
-    // Unhide the cursor.
-    print!("\x1b[?25h");
+    // Stop progress thread.
+    found.store(true, Ordering::Relaxed);
+    progress_handle.join().unwrap();
 
-    Err(HashsatError::DepletedSearchSpace(min, max))
+    // Check the final result (jackpot or depleted search space).
+    let final_crack_res = crack_res.lock().unwrap().take();
+    let total_tries_ctr = tries_ctr.load(Ordering::Relaxed);
+    let elapsed = start.elapsed();
+
+    if let Some(jackpot) = final_crack_res {
+        wallet.passphrase = Some(jackpot.passphrase.clone());
+        wallet.xpub = Some(jackpot.xpub);
+        wallet.xpriv = Some(jackpot.xpriv);
+
+        print!(
+            "\r{} cracking sats : {} ({} wallets in {}){:<3}",
+            SPINNERS[0],
+            jackpot.passphrase,
+            format_number(total_tries_ctr),
+            format_duration(elapsed),
+            COMMAS[0],
+        );
+        stdout().flush()?;
+
+        println!("\n\nJACKPOT!");
+        println!(
+            "hashsat found your lost sats in {} and {} tries ({} wallets per second)\n",
+            format_duration(elapsed),
+            format_number(total_tries_ctr),
+            if elapsed.as_secs() > 0 {
+                total_tries_ctr as u64 / elapsed.as_secs()
+            } else {
+                total_tries_ctr as u64
+            }
+        );
+        println!("{wallet}");
+
+        // Unhide the cursor.
+        print!("\x1b[?25h");
+
+        Ok(())
+    } else {
+        // Unhide the cursor.
+        print!("\x1b[?25h");
+
+        Err(HashsatError::DepletedSearchSpace(min, max))
+    }
 }
 
 #[allow(dead_code)]
@@ -162,7 +241,7 @@ fn generate_passphrases_of_size(size: usize, alphabet: &str) -> impl Iterator<It
 ///
 /// Returns ([`Passphrase`, `Xpub`, `Xpriv`]) if `target_address` is within the wallet. If not,
 /// returns None.
-fn derive_wallet(wallet: &Wallet, passphrase: &String) -> Option<(String, Xpub, Xpriv)> {
+fn derive_wallet_and_assert(wallet: &Wallet, passphrase: &String) -> Option<(String, Xpub, Xpriv)> {
     // Spawn `secp256k1` context.
     let secp = Secp256k1::new();
 
@@ -245,12 +324,25 @@ fn format_number(n: usize) -> String {
         .collect()
 }
 
+/// Get the alphabet from it's identifier.
+fn get_alphabet(identifier: &str) -> &'static str {
+    match identifier {
+        "alphanumeric" => ALPHABET_ALPHANUMERIC,
+        "alphanumeric_uppercase" => ALPHABET_ALPHANUMERIC_UPPERCASE,
+        "alphanumeric_lowercase" => ALPHABET_ALPHANUMERIC_LOWERCASE,
+        "uppercase" => ALPHABET_UPPERCASE,
+        "lowercase" => ALPHABET_LOWERCASE,
+        "numeric" => ALPHABET_NUMERIC,
+        _ => ALPHABET_ALPHANUMERIC,
+    }
+}
+
 /// Print cracking parameters.
 fn print_cracking_params(wallet: &Wallet) {
     println!("cracking");
     println!(" {}", wallet.mnemonic);
     println!("using alphabet");
-    println!(" {}", wallet.alphabet);
+    println!(" {} ({})", wallet.alphabet, get_alphabet(&wallet.alphabet));
     println!("with target address");
     println!(" {}", wallet.target_address);
     println!("on network");

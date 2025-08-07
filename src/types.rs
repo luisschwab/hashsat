@@ -9,7 +9,7 @@ use bitcoin::{
 };
 
 /// Abstract representation of a lost wallet.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Wallet {
     /// The BIP39-compliant mnemonic.
     pub(crate) mnemonic: Mnemonic,
