@@ -15,6 +15,7 @@ use bitcoin::{
     bip32::{ChildNumber, Xpriv, Xpub},
     key::Secp256k1,
 };
+use rand::{rng, seq::SliceRandom};
 
 #[rustfmt::skip]
 const ALPHABET_ALPHANUMERIC: &str ="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -97,7 +98,13 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
     // Generate all possible passphrases, which are lazy eval'd.
     let mut passphrase_set: Vec<Box<dyn Iterator<Item = String> + Send>> = Vec::new();
     for size in min..=max {
-        let passphrase_subset = generate_passphrases_of_size(size, alphabet);
+        // Scramble the alphabet on every run so walks across
+        // the search space are random instead of lexicographical.
+        let mut chars: Vec<char> = alphabet.chars().collect();
+        chars.shuffle(&mut rng());
+        let scrambled_alphabet: String = chars.into_iter().collect();
+
+        let passphrase_subset = generate_passphrases_of_size(size, scrambled_alphabet);
         passphrase_set.push(Box::new(passphrase_subset));
     }
     let passphrase_set_len = passphrase_set.len() - 1;
@@ -204,7 +211,7 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
 ///
 /// Rust iterators are lazy (they're only evaluated when used),
 /// so we are not allocating a shit ton of memory with all passphrase combinations.
-fn generate_passphrases_up_to(size: usize, alphabet: &str) -> impl Iterator<Item = String> {
+fn generate_passphrases_up_to(size: usize, alphabet: String) -> impl Iterator<Item = String> {
     (1..=size).flat_map(move |length| {
         let chars: Vec<char> = alphabet.chars().collect();
         (0..(chars.len() as u128).pow(length as u32)).map(move |mut n| {
@@ -224,7 +231,7 @@ fn generate_passphrases_up_to(size: usize, alphabet: &str) -> impl Iterator<Item
 /// so we are not allocating a shit ton of memory with all passphrase combinations.
 ///
 /// TODO(@luisschwab): allow the user to search passphrases of exact lenght.
-fn generate_passphrases_of_size(size: usize, alphabet: &str) -> impl Iterator<Item = String> {
+fn generate_passphrases_of_size(size: usize, alphabet: String) -> impl Iterator<Item = String> {
     let chars: Vec<char> = alphabet.chars().collect();
     (0..(chars.len() as u128).pow(size as u32)).map(move |mut n| {
         let mut result = String::new();
