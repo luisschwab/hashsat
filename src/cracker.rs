@@ -16,6 +16,9 @@ use bitcoin::{
     key::Secp256k1,
 };
 use rand::{rng, seq::SliceRandom};
+use rayon::iter::{ParallelBridge, ParallelIterator};
+
+use crate::{error::HashsatError, types::Wallet};
 
 #[rustfmt::skip]
 const ALPHABET_ALPHANUMERIC: &str ="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -28,13 +31,67 @@ const ALPHABET_NUMERIC: &str = "0123456789";
 const COMMAS: [&str; 4] = ["", ".", "..", "..."];
 const SPINNERS: [char; 4] = ['\\', '|', '/', '–'];
 
-use crate::{error::HashsatError, types::Wallet};
+/// Round-Robin iteration between different length passphrases.
+struct RoundRobinIter {
+    /// Iterators for each passphrase subset.
+    passphrase_subset_iters: Vec<Box<dyn Iterator<Item = String> + Send>>,
+    /// Current position in the Round-Robin cycle.
+    current_idx: usize,
+    /// Keep track of exhausted subsets.
+    exhausted_subsets: Vec<bool>,
+}
 
-#[derive(Clone)]
-struct CrackResult {
-    passphrase: String,
-    xpub: Xpub,
-    xpriv: Xpriv,
+impl RoundRobinIter {
+    fn new(min: usize, max: usize, alphabet: String) -> Self {
+        let mut passphrase_subset_iters = Vec::new();
+        for size in min..=max {
+            // Scramble the alphabet on every run so walks across
+            // the search space are random instead of lexicographical.
+            // This make sure that different runs walk different paths.
+            let mut chars: Vec<char> = alphabet.chars().collect();
+            chars.shuffle(&mut rng());
+            let scrambled_alphabet: String = chars.into_iter().collect();
+
+            let iter = generate_passphrases_of_size(size, scrambled_alphabet.clone());
+            passphrase_subset_iters.push(Box::new(iter) as Box<dyn Iterator<Item = String> + Send>);
+        }
+        let n_subsets = passphrase_subset_iters.len();
+
+        Self {
+            passphrase_subset_iters,
+            current_idx: 0,
+            exhausted_subsets: vec![false; n_subsets],
+        }
+    }
+}
+
+impl Iterator for RoundRobinIter {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.passphrase_subset_iters.is_empty() {
+            return None;
+        }
+
+        let start_idx = self.current_idx;
+        loop {
+            if !self.exhausted_subsets[self.current_idx] {
+                if let Some(passphrase) = self.passphrase_subset_iters[self.current_idx].next() {
+                    self.current_idx = (self.current_idx + 1) % self.passphrase_subset_iters.len();
+                    return Some(passphrase);
+                } else {
+                    self.exhausted_subsets[self.current_idx] = true;
+                }
+            }
+            self.current_idx = (self.current_idx + 1) % self.passphrase_subset_iters.len();
+
+            if self.current_idx == start_idx
+                && self.exhausted_subsets.iter().all(|&exhausted| exhausted)
+            {
+                return None;
+            }
+        }
+    }
 }
 
 /// Crack the passphrase with [`ALPHABET`] until [`MAX_PASSPHRASE_LEN`] is depleted.
@@ -58,7 +115,6 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
     // Thread-common state.
     let found = Arc::new(AtomicBool::new(false));
     let tries_ctr = Arc::new(AtomicUsize::new(0));
-    let crack_res = Arc::new(Mutex::new(None::<CrackResult>));
     let curr_passphrase = Arc::new(Mutex::new(String::new()));
 
     // Start time.
@@ -80,7 +136,7 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
                 let curr_passphrase = curr_passphrase_clone.lock().unwrap().clone();
 
                 print!(
-                    "\r{} cracking sats : {:?} ({} wallets in {}){:<3}",
+                    "\r{} cracking sats : {} ({} wallets in {}){:<3}",
                     SPINNERS[spinner_idx],
                     curr_passphrase,
                     format_number(tries),
@@ -95,114 +151,74 @@ pub(crate) fn crack(wallet: &mut Wallet) -> Result<(), HashsatError> {
         }
     });
 
-    // Generate all possible passphrases, which are lazy eval'd.
-    let mut passphrase_set: Vec<Box<dyn Iterator<Item = String> + Send>> = Vec::new();
-    for size in min..=max {
-        // Scramble the alphabet on every run so walks across
-        // the search space are random instead of lexicographical.
-        let mut chars: Vec<char> = alphabet.chars().collect();
-        chars.shuffle(&mut rng());
-        let scrambled_alphabet: String = chars.into_iter().collect();
+    // Round-Robin iterator: join subsets into a unified iterator.
+    let rr_iter = RoundRobinIter::new(min, max, alphabet.to_string());
+    let crack_res = rr_iter.par_bridge().find_any(|passphrase| {
+        // Update progress counter
+        let tries = tries_ctr.fetch_add(1, Ordering::Relaxed);
 
-        let passphrase_subset = generate_passphrases_of_size(size, scrambled_alphabet);
-        passphrase_set.push(Box::new(passphrase_subset));
-    }
-    let passphrase_set_len = passphrase_set.len() - 1;
+        // Update the progress bar with the current passphrase every once in a while.
+        if tries % 69 == 0 {
+            *curr_passphrase.lock().unwrap() = passphrase.clone();
+        }
 
-    let handles: Vec<_> = passphrase_set
-        .into_iter()
-        .enumerate()
-        .map(|(idx, passphrase_subset)| {
-            let wallet_clone = wallet.clone();
-            let found_clone = found.clone();
-            let tries_ctr_clone = tries_ctr.clone();
-            let crack_res_clone = crack_res.clone();
-            let curr_passphrase_clone = curr_passphrase.clone();
+        // Test and assert this passphrase against the wallet
+        // parameters. `find_any` will return the findings if they are `Some()`.
+        derive_wallet_and_assert(wallet, passphrase).is_some()
+    });
 
-            thread::spawn(move || {
-                println!("hasher {idx} ready!");
-                if idx >= passphrase_set_len {
-                    println!();
-                }
-
-                for passphrase in passphrase_subset {
-                    if found_clone.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    if tries_ctr_clone.fetch_add(1, Ordering::Relaxed) % 21 == 0 {
-                        *curr_passphrase_clone.lock().unwrap() = passphrase.clone();
-                    }
-
-                    // Derive a wallet from each passphrase, then derive
-                    // some addresses and check against the target.
-                    if let Some((passphrase, xpub, xpriv)) =
-                        derive_wallet_and_assert(&wallet_clone, &passphrase)
-                    {
-                        found_clone.store(true, Ordering::Relaxed);
-                        *crack_res_clone.lock().unwrap() = Some(CrackResult {
-                            passphrase,
-                            xpub,
-                            xpriv,
-                        });
-                        break;
-                    }
-                }
-            })
-        })
-        .collect();
-
-    // Wait for all threads.
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // Stop progress thread.
+    // Signal progress thread to stop.
     found.store(true, Ordering::Relaxed);
     progress_handle.join().unwrap();
 
-    // Check the final result (jackpot or depleted search space).
-    let final_crack_res = crack_res.lock().unwrap().take();
-    let total_tries_ctr = tries_ctr.load(Ordering::Relaxed);
+    let total_tries = tries_ctr.load(Ordering::Relaxed);
     let elapsed = start.elapsed();
 
-    if let Some(jackpot) = final_crack_res {
-        wallet.passphrase = Some(jackpot.passphrase.clone());
-        wallet.xpub = Some(jackpot.xpub);
-        wallet.xpriv = Some(jackpot.xpriv);
+    match crack_res {
+        Some(jackpot) => {
+            if let Some((passphrase, xpub, xpriv)) = derive_wallet_and_assert(wallet, &jackpot) {
+                wallet.passphrase = Some(passphrase.clone());
+                wallet.xpub = Some(xpub);
+                wallet.xpriv = Some(xpriv);
 
-        print!(
-            "\r{} cracking sats : {} ({} wallets in {}){:<3}",
-            SPINNERS[0],
-            jackpot.passphrase,
-            format_number(total_tries_ctr),
-            format_duration(elapsed),
-            COMMAS[0],
-        );
-        stdout().flush()?;
+                print!(
+                    "\r{} cracking sats : {} ({} wallets in {}){:<3}",
+                    SPINNERS[0],
+                    passphrase,
+                    format_number(total_tries),
+                    format_duration(elapsed),
+                    COMMAS[0],
+                );
+                stdout().flush()?;
 
-        println!("\n\nJACKPOT!");
-        println!(
-            "hashsat found your lost sats in {} and {} tries ({} wallets per second)\n",
-            format_duration(elapsed),
-            format_number(total_tries_ctr),
-            if elapsed.as_secs() > 0 {
-                total_tries_ctr as u64 / elapsed.as_secs()
+                println!("\n\nJACKPOT!");
+                println!(
+                    "hashsat found your lost sats in {} and {} tries ({} wallets per second)\n",
+                    format_duration(elapsed),
+                    format_number(total_tries),
+                    if elapsed.as_secs() > 0 {
+                        total_tries as u64 / elapsed.as_secs()
+                    } else {
+                        total_tries as u64
+                    }
+                );
+                println!("{wallet}");
+
+                // Unhide the cursor.
+                print!("\x1b[?25h");
+
+                Ok(())
             } else {
-                total_tries_ctr as u64
+                Ok(())
             }
-        );
-        println!("{wallet}");
+        }
+        None => {
+            // Unhide the cursor.
+            print!("\x1b[?25h");
 
-        // Unhide the cursor.
-        print!("\x1b[?25h");
-
-        Ok(())
-    } else {
-        // Unhide the cursor.
-        print!("\x1b[?25h");
-
-        Err(HashsatError::DepletedSearchSpace(min, max))
+            println!("\nSearch space depleted without finding passphrase");
+            Err(HashsatError::DepletedSearchSpace(min, max))
+        }
     }
 }
 
@@ -229,8 +245,6 @@ fn generate_passphrases_up_to(size: usize, alphabet: String) -> impl Iterator<It
 ///
 /// Rust iterators are lazy (they're only evaluated when used),
 /// so we are not allocating a shit ton of memory with all passphrase combinations.
-///
-/// TODO(@luisschwab): allow the user to search passphrases of exact lenght.
 fn generate_passphrases_of_size(size: usize, alphabet: String) -> impl Iterator<Item = String> {
     let chars: Vec<char> = alphabet.chars().collect();
     (0..(chars.len() as u128).pow(size as u32)).map(move |mut n| {
@@ -363,8 +377,11 @@ fn print_cracking_params(wallet: &Wallet) {
     );
     println!("and passphrase length range of");
     println!(
-        " ({},{}) \n",
+        " ({},{})",
         wallet.passphrase_length_range.0, wallet.passphrase_length_range.1
     );
+    println!("using");
+    println!(" {} threads", rayon::current_num_threads());
+    println!();
     std::thread::sleep(Duration::from_secs(1));
 }
