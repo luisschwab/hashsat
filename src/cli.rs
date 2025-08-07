@@ -22,7 +22,24 @@ pub(crate) struct Arguments {
     )]
     pub(crate) mnemonic: String,
 
-    #[arg(short, long, value_name = "network", default_value = "bitcoin", value_parser = PossibleValuesParser::new(["bitcoin", "signet", "testnet3", "testnet4"]), help = "The bitcoin network to search for addresses at")]
+    #[arg(
+        short,
+        long,
+        value_name = "alphabet",
+        default_value = "alphanumeric",
+        value_parser = PossibleValuesParser::new(["alphanumeric", "alphanumeric_uppercase", "alphanumeric_lowercase", "uppercase", "lowercase", "numeric"]),
+        help = "The alphabet to search passphrases from. Constraining the passphrase search space will improve cracking times exponentially"
+    )]
+    pub(crate) alphabet: String,
+
+    #[arg(
+        short,
+        long,
+        value_name = "network",
+        default_value = "bitcoin",
+        value_parser = PossibleValuesParser::new(["bitcoin", "signet", "testnet3", "testnet4"]),
+        help = "The bitcoin network to search for addresses at"
+    )]
     pub(crate) network: String,
 
     #[arg(
@@ -51,19 +68,22 @@ pub(crate) struct Arguments {
     pub(crate) search_width: usize,
 
     #[arg(
-        short = 'l',
+        short = 'r',
         long,
-        value_name = "max_passphrase_len",
-        default_value_t = 10,
-        help = "The maximum passphrase lenght to be searched. Will return an error if your address is not found within the search space"
+        value_name = "passphrase_length_range",
+        value_parser = parse_range,
+        default_value = "1,10",
+        help = "The passphrase lenght range to be searched. Will return an error if your address is not found within the search space"
     )]
-    pub(crate) max_passphrase_length: usize,
+    pub(crate) passphrase_length_range: (usize, usize),
 }
 
 /// Parse the CLI arguments into a [`Wallet`].
 pub(crate) fn parse_cli_arguments(args: Arguments) -> Result<Wallet, HashsatError> {
     // Parse the mnemonic.
     let mnemonic = Mnemonic::from_str(&args.mnemonic)?;
+    // Parse the passphrase alphabet.
+    let alphabet = args.alphabet;
     // Parse the network.
     let network = Network::from_str(&args.network)?;
     // Parse the target address.
@@ -103,18 +123,39 @@ pub(crate) fn parse_cli_arguments(args: Arguments) -> Result<Wallet, HashsatErro
     };
     // Get the search width.
     let search_width = args.search_width;
-    // Get the maximum passphrase lenght.
-    let max_passphrase_len = args.max_passphrase_length;
+    // Get the passphrase lenght range.
+    let passphrase_length_range = args.passphrase_length_range;
 
     Ok(Wallet {
         mnemonic,
+        alphabet,
         target_address,
         derivation_path,
         search_width,
-        max_passphrase_len,
+        passphrase_length_range,
         network,
         passphrase: None,
         xpub: None,
         xpriv: None,
     })
+}
+
+fn parse_range(s: &str) -> Result<(usize, usize), String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 2 {
+        return Err("Range must be in format 'min,max'".to_string());
+    }
+
+    let min = parts[0]
+        .parse::<usize>()
+        .map_err(|_| "Invalid minimum value")?;
+    let max = parts[1]
+        .parse::<usize>()
+        .map_err(|_| "Invalid maximum value")?;
+
+    if min > max {
+        return Err("Minimum cannot be greater than maximum".to_string());
+    }
+
+    Ok((min, max))
 }
